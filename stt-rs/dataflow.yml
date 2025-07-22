@@ -1,0 +1,22 @@
+nodes:
+  - id: dora-microphone
+    description: Microphone
+    path: dora-microphone
+    inputs:
+      tick: dora/timer/millis/2000
+    outputs:
+      - audio
+    env:
+      # SAMPLE_RATE: 24000
+      MAX_DURATION: 0.5
+      DEVICE: BlackHole 2ch, Core Audio
+
+  - id: hibiki
+    path: /Users/xaviertao/Documents/work/delayed-streams-modeling/target/release/kyutai-stt-rs
+    args: gen
+    inputs:
+      audio:
+        source: dora-microphone/audio
+        queue_size: 1000000
+    outputs:
+      - audio

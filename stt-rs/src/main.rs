@@ -5,6 +5,7 @@
 use anyhow::Result;
 use candle::{Device, Tensor};
 use clap::Parser;
+use dora_node_api::{DoraNode, IntoArrow, MetadataParameters, dora_core::config::DataId, into_vec};
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -145,29 +146,37 @@ impl Model {
             state,
             config,
             text_tokenizer,
-            timestamps: args.timestamps,
-            vad: args.vad,
+            timestamps: false,
+            vad: true,
             dev: dev.clone(),
         })
     }
 
-    fn run(&mut self, mut pcm: Vec<f32>) -> Result<()> {
-        use std::io::Write;
-
+    fn run(&mut self) -> Result<()> {
         // Add the silence prefix to the audio.
         if self.config.stt_config.audio_silence_prefix_seconds > 0.0 {
             let silence_len =
                 (self.config.stt_config.audio_silence_prefix_seconds * 24000.0) as usize;
-            pcm.splice(0..0, vec![0.0; silence_len]);
         }
         // Add some silence at the end to ensure all the audio is processed.
         let suffix = (self.config.stt_config.audio_delay_seconds * 24000.0) as usize;
-        pcm.resize(pcm.len() + suffix + 24000, 0.0);
 
         let mut last_word = None;
         let mut printed_eot = false;
-        for pcm in pcm.chunks(1920) {
-            let pcm = Tensor::new(pcm, &self.dev)?.reshape((1, 1, ()))?;
+        let (mut node, mut event) = DoraNode::init_from_env().unwrap();
+        while let Some(event) = event.recv() {
+            let data = match event {
+                dora_node_api::Event::Input { id, metadata, data } => data,
+                dora_node_api::Event::Stop(_) => {
+                    break;
+                }
+                _ => {
+                    continue;
+                }
+            };
+            let data: Vec<f32> = into_vec(&data).unwrap();
+
+            let pcm = Tensor::new(data, &self.dev)?.reshape((1, 1, ()))?;
             let asr_msgs = self.state.step_pcm(pcm, None, &().into(), |_, _, _| ())?;
             for asr_msg in asr_msgs.iter() {
                 match asr_msg {
@@ -175,10 +184,11 @@ impl Model {
                         // prs is the probability of having no voice activity for different time
                         // horizons.
                         // In kyutai/stt-1b-en_fr-candle, these horizons are 0.5s, 1s, 2s, and 3s.
+                        println!(" <endofturn pr={}>", prs[2][0]);
                         if self.vad && prs[2][0] > 0.5 && !printed_eot {
                             printed_eot = true;
                             if !self.timestamps {
-                                print!(" <endofturn pr={}>", prs[2][0]);
+                                println!(" <endofturn pr={}>", prs[2][0]);
                             } else {
                                 println!("<endofturn pr={}>", prs[2][0]);
                             }
@@ -196,18 +206,24 @@ impl Model {
                         tokens, start_time, ..
                     } => {
                         printed_eot = false;
-                        let word = self
+                        let mut word = self
                             .text_tokenizer
                             .decode_piece_ids(tokens)
                             .unwrap_or_else(|_| String::new());
+                        word.push(' ');
                         if !self.timestamps {
-                            print!(" {word}");
-                            std::io::stdout().flush()?
+                            println!(" {word}");
+                            node.send_output(
+                                DataId::from("text".to_string()),
+                                MetadataParameters::default(),
+                                word.into_arrow(),
+                            )
+                            .unwrap();
                         } else {
+                            last_word = Some((word, *start_time));
                             if let Some((word, prev_start_time)) = last_word.take() {
                                 println!("[{prev_start_time:5.2}-{start_time:5.2}] {word}");
                             }
-                            last_word = Some((word, *start_time));
                         }
                     }
                 }
@@ -226,16 +242,9 @@ fn main() -> Result<()> {
     let device = device(args.cpu)?;
     println!("Using device: {:?}", device);
 
-    println!("Loading audio file from: {}", args.in_file);
-    let (pcm, sample_rate) = kaudio::pcm_decode(&args.in_file)?;
-    let pcm = if sample_rate != 24_000 {
-        kaudio::resample(&pcm, sample_rate as usize, 24_000)?
-    } else {
-        pcm
-    };
     println!("Loading model from repository: {}", args.hf_repo);
     let mut model = Model::load_from_hf(&args, &device)?;
     println!("Running inference");
-    model.run(pcm)?;
+    model.run()?;
     Ok(())
 }
