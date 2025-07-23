@@ -161,6 +161,7 @@ impl Model {
         // Add some silence at the end to ensure all the audio is processed.
         let suffix = (self.config.stt_config.audio_delay_seconds * 24000.0) as usize;
 
+        let mut current_prompt = String::new();
         let mut last_word = None;
         let mut printed_eot = false;
         let (mut node, mut event) = DoraNode::init_from_env().unwrap();
@@ -210,11 +211,27 @@ impl Model {
                             .text_tokenizer
                             .decode_piece_ids(tokens)
                             .unwrap_or_else(|_| String::new());
-                        word.push(' ');
+                        println!(" {word}");
+                        // Check if last char is a punctuation
+                        if let Some(last_char) = word.chars().last() {
+                            if ['.', '!', '?'].contains(&last_char) {
+                                word.push('\n');
+                                current_prompt.push_str(&word);
+                                node.send_output(
+                                    DataId::from("text".to_string()),
+                                    MetadataParameters::default(),
+                                    current_prompt.clone().into_arrow(),
+                                )
+                                .unwrap();
+                                current_prompt.clear();
+                            } else {
+                                word.push(' ');
+                                current_prompt.push_str(&word);
+                            }
+                        }
                         if !self.timestamps {
-                            println!(" {word}");
                             node.send_output(
-                                DataId::from("text".to_string()),
+                                DataId::from("word".to_string()),
                                 MetadataParameters::default(),
                                 word.into_arrow(),
                             )
